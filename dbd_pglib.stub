@@ -30,6 +30,7 @@
 (define-enum PGRES_EMPTY_QUERY)
 (define-enum PGRES_COMMAND_OK)
 (define-enum PGRES_TUPLES_OK)
+(define-enum PGRES_SINGLE_TUPLE)
 (define-enum PGRES_COPY_OUT)
 (define-enum PGRES_COPY_IN)
 (define-enum PGRES_BAD_RESPONSE)
@@ -68,6 +69,14 @@
 ;; Query
 (define-cproc pq-exec (conn::<pg-conn> query::<const-cstring>)
   (call <pg-result> "PQexec"))
+(define-cproc pq-send-query (conn::<pg-conn> query::<const-cstring>)
+  (call <int> "PQsendQuery"))
+
+(define-cproc pq-get-result (conn::<pg-conn>)
+  (call <pg-result> "PQgetResult"))
+
+(define-cproc pq-single-row-mode (conn::<pg-conn>)
+  (call <int> "PQsetSingleRowMode"))
 
 (define-cproc pq-result-status (result::<pg-result>)
   (call <int> "PQresultStatus"))
@@ -92,6 +101,12 @@
   (call <int> "PQfmod"))
 (define-cproc pq-binary-tuples (result::<pg-result>)
   (call <boolean> "PQbinaryTuples"))
+
+(define-cproc pq-result-null? (result::<pg-result>)
+  (body "if(result == NULL)"
+	"SCM_RESULT = SCM_TRUE;"
+	"else"
+	"SCM_RESULT = SCM_FALSE;"))
 
 (define-cproc pq-getvalue (result::<pg-result> row_id::<int> col_id::<int>)
   ;; the result may be binary, so we use explicit length.

@@ -14,10 +14,12 @@
   (export <pg-driver>
           <pg-connection>
           <pg-result-set>
+	  <pg-result-stream>
           <pg-row>
 
           ;; low-level stuff
           <pg-conn> <pg-result>
+	  *pq-single-row-mode*
           pq-connectdb pq-finish pq-reset pq-db pq-user pq-pass pq-host
           pq-port pq-tty pq-options pq-status pq-error-message
           pq-backend-pid pq-exec pq-result-status pq-res-status
@@ -32,6 +34,8 @@
 ;; Loads extension
 (dynamic-load "dbd_pg")
 
+(define *pq-single-row-mode* (make-parameter #f))
+
 (define-class <pg-driver> (<dbi-driver> <singleton-mixin>) ())
 
 (define-class <pg-connection> (<dbi-connection>)
@@ -43,8 +47,10 @@
    (%error :init-keyword :error)
    (%num-rows :init-keyword :num-rows)
    (%columns  :init-value #f)
-   (num-cols :getter dbi-column-count :init-keyword :num-cols)
-   ))
+   (num-cols :getter dbi-column-count :init-keyword :num-cols)))
+
+(define-class <pg-result-stream> (<sequence>)
+  ((%connection :init-keyword :connection)))
 
 (define-class <pg-row> (<sequence>)
   ((%result-set :init-keyword :result-set)
@@ -90,17 +96,26 @@
                                              (q <dbi-query>) params)
   (pg-connection-check c)
   (let* ((h  (slot-ref c '%handle))
-         (prepared (slot-ref q 'prepared))
-         (result (pq-exec h (apply prepared params)))
-         (status (pq-result-status result)))
-    (when (memv status `(,PGRES_NONFATAL_ERROR ,PGRES_FATAL_ERROR))
-      (error <dbi-error> (pq-result-error-message result)))
-    (make <pg-result-set>
-      :pg-result result
-      :status status
-      :error error
-      :num-rows (pq-ntuples result)
-      :num-cols (pq-nfields result))))
+         (prepared (slot-ref q 'prepared)))
+    (if (*pq-single-row-mode*)
+      (let1 status (pq-send-query h (apply prepared params))
+	(when (= status 0)
+	  (error <dbi-error> "could not send query"))
+	(let1 status (pq-single-row-mode h)
+	  (when (= status 0)
+	    (error <dbi-error> "could not activate single row mode"))
+	  (make <pg-result-stream>
+	    :connection c)))
+      (let* ((result (pq-exec h (apply prepared params)))
+	     (status (pq-result-status result)))
+	(when (memv status `(,PGRES_NONFATAL_ERROR ,PGRES_FATAL_ERROR))
+	  (error <dbi-error> (pq-result-error-message result)))
+	(make <pg-result-set>
+	  :pg-result result
+	  :status status
+	  :error error
+	  :num-rows (pq-ntuples result)
+	  :num-cols (pq-nfields result))))))
 
 (define (pg-result-set-check r)
   (when (pq-cleared? (slot-ref r '%pg-result))
@@ -152,6 +167,32 @@
       (make <pg-row> :result-set r :row-id row-id))
     (proc end? next)))
 
+(define-method call-with-iterator ((s <pg-result-stream>) proc . option)
+  (let* ((c (slot-ref s '%connection))
+	 (h (slot-ref c '%handle))
+	 (r #f))
+    (define (end?)
+      (dbi-close r)
+      (set! r (let1 tmp (pq-get-result h)
+		(make <pg-result-set>
+		  :pg-result tmp
+		  :status (pq-result-status tmp)
+		  :num-rows (pq-ntuples tmp)
+		  :num-cols (pq-nfields tmp))))
+      (pg-result-set-check r)
+      (when (> (slot-ref r '%num-rows) 1)
+	(error <dbi-error> "pg-result should have exactly one row"))
+      (let1 status (slot-ref r '%status)
+	(if (equal? status PGRES_SINGLE_TUPLE)
+	  #f
+	  (begin
+	    (do ((t (slot-ref r '%pg-result) (pq-get-result h)))
+	       ((pq-result-null? t) #t)
+	     (pq-clear t))))))
+    (define (next)
+      (make <pg-row> :result-set r :row-id 0))
+    (proc end? next)))
+
 (define-method call-with-iterator ((row <pg-row>) proc . option)
   (let* ((result   (slot-ref row '%result-set))
          (num-cols (slot-ref result 'num-cols))
@@ -176,6 +217,10 @@
 (define-method dbi-close ((result-set <pg-result-set>))
   (unless (pq-cleared? (ref result-set '%pg-result))
     (pq-clear (ref result-set '%pg-result))))
+
+(define-method dbi-close ((result-set <pg-result-stream>))
+  ;; TODO: Anything to cleanup here?
+  )
 
 (define-method dbi-open? ((connection <pg-connection>))
   (not (pq-finished? (slot-ref connection '%handle))))

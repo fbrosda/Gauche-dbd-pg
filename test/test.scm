@@ -81,6 +81,18 @@
 (test* "dbi-close (result)" #f
        (begin (dbi-close *res*) (dbi-open? *res*)))
 
+(test* "dbi-query (single-row-mode)" #t
+       (begin
+	 (parameterize ((*pq-single-row-mode* #t))
+	   (set! *res* (dbi-do *conn* "select * from test"))
+	   (is-a? *res* <pg-result-stream>))))
+
+(test* "dbi-get-value with map (single-row-mode)"
+       '(("10" "yasuyuki") ("20" "nyama") ("30" "who's this?"))
+  (map (lambda (row)
+         (list (dbi-get-value row 0) (dbi-get-value row 1)))
+       *res*))
+
 (test* "dbi-close (connection)" #f
        (begin (dbi-close *conn*) (dbi-open? *conn*)))
 
